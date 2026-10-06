@@ -1,0 +1,30 @@
+# Allowlist the build inputs. In particular, never send local databases,
+# credentials, virtual environments, SDK caches or generated web builds.
+**
+!Dockerfile
+!.dockerignore
+!backend/
+!backend/pyproject.toml
+!backend/uv.lock
+!backend/.python-version
+!backend/app/
+!backend/app/*.py
+!backend/data/
+!backend/data/trips.json
+!frontend/
+!frontend/.flutter-version
+!frontend/pubspec.yaml
+!frontend/pubspec.lock
+!frontend/lib/
+!frontend/lib/**
+!frontend/web/
+!frontend/web/**
+# Keep sensitive/runtime files out even if accidentally placed under assets.
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.sqlite3
+**/*.sqlite3-*
+**/*.db
+**/*.db-*

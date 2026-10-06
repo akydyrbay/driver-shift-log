@@ -1,0 +1,24 @@
+services:
+  app:
+    build:
+      context: .
+    ports:
+      - "127.0.0.1:${APP_PORT:-8080}:8000"
+    environment:
+      TRIPS_DB: /data/trips.sqlite3
+      WEB_DIR: /app/web
+      TZ: Asia/Almaty
+    volumes:
+      - trips-data:/data
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  trips-data:
