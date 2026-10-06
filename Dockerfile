@@ -10,7 +10,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 RUN git clone --depth 1 --branch "${FLUTTER_VERSION}" https://github.com/flutter/flutter.git /opt/flutter \
     && test "$(git -C /opt/flutter rev-parse HEAD)" = "${FLUTTER_REVISION}"
-ENV PATH="/opt/flutter/bin:${PATH}"
+ENV PATH="/opt/flutter/bin:${PATH}" \
+    TAR_OPTIONS=--no-same-owner
 RUN flutter config --no-analytics && flutter precache --web
 WORKDIR /src
 COPY frontend/.flutter-version frontend/pubspec.yaml frontend/pubspec.lock ./
