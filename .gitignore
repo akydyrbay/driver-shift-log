@@ -174,3 +174,10 @@ dmypy.json
 # Local SQLite databases and their transaction files.
 *.sqlite3
 *.sqlite3-*
+
+# Local secrets and CI image archives.
+.env.*
+*.pem
+*.key
+image.tar
+image.tar.gz

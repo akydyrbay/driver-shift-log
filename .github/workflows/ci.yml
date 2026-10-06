@@ -1,0 +1,158 @@
+name: CI and release
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  backend:
+    name: Backend tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.11.18"
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - name: Install Python and locked dependencies
+        run: |
+          uv python install 3.12.13
+          uv sync --locked --python 3.12.13
+      - name: Run backend regression tests
+        run: uv run --locked --no-sync python -m unittest discover -s tests -v
+
+  frontend:
+    name: Flutter checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      FLUTTER_VERSION: "3.47.3"
+      FLUTTER_REVISION: e8113bf45620cbeb8aff64947ee4c93e16adb4cf
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install pinned Flutter SDK
+        run: |
+          test "$(cat frontend/.flutter-version)" = "$FLUTTER_VERSION"
+          flutter_sdk="$RUNNER_TEMP/flutter-sdk"
+          git clone --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$flutter_sdk"
+          test "$(git -C "$flutter_sdk" rev-parse HEAD)" = "$FLUTTER_REVISION"
+          printf '%s\n' "$flutter_sdk/bin" >> "$GITHUB_PATH"
+          "$flutter_sdk/bin/flutter" config --no-analytics
+          "$flutter_sdk/bin/flutter" precache --web
+      - name: Install locked packages
+        working-directory: frontend
+        run: flutter pub get --enforce-lockfile
+      - name: Analyze
+        working-directory: frontend
+        run: flutter analyze --no-pub
+      - name: Test
+        working-directory: frontend
+        run: flutter test --no-pub
+      - name: Build same-origin web client
+        working-directory: frontend
+        run: flutter build web --release --no-pub --no-web-resources-cdn --pwa-strategy=none
+
+  docker:
+    name: Docker integration
+    needs: [backend, frontend]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    outputs:
+      image-id: ${{ steps.image.outputs.id }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Validate Docker configuration
+        run: |
+          docker compose config --quiet
+          docker build --check .
+      - name: Build complete application
+        run: |
+          docker build --tag driver-shift-log:ci \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" .
+      - name: Test container and volume persistence
+        run: python3 scripts/check_container.py --image driver-shift-log:ci
+      - name: Record tested image identity
+        id: image
+        run: |
+          image_id=$(docker image inspect driver-shift-log:ci --format '{{.Id}}')
+          printf 'id=%s\n' "$image_id" >> "$GITHUB_OUTPUT"
+      - name: Export tested release image
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        run: docker image save driver-shift-log:ci | gzip -1 > "$RUNNER_TEMP/image.tar.gz"
+      - name: Transfer tested image to publishing job
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: tested-container
+          path: ${{ runner.temp }}/image.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  publish:
+    name: Publish GHCR image
+    needs: [docker]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+      EXPECTED_IMAGE_ID: ${{ needs.docker.outputs.image-id }}
+    steps:
+      - name: Use temporary Docker credentials directory
+        run: printf 'DOCKER_CONFIG=%s/docker-auth\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - name: Download the image from this workflow run
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: tested-container
+          path: ${{ runner.temp }}/release
+      - name: Verify and tag the tested image
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[A-Za-z0-9_.-]{1,127}$ ]]; then
+            printf 'Invalid Docker release tag: %s\n' "$RELEASE_TAG" >&2
+            exit 1
+          fi
+          docker image load --input "$RUNNER_TEMP/release/image.tar.gz"
+          test "$(docker image inspect driver-shift-log:ci --format '{{.Id}}')" = "$EXPECTED_IMAGE_ID"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:$RELEASE_TAG"
+          docker image tag driver-shift-log:ci "$image"
+          printf 'RELEASE_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Publish versioned image
+        run: |
+          docker image push "$RELEASE_IMAGE"
+          digest=$(docker image inspect "$RELEASE_IMAGE" --format '{{index .RepoDigests 0}}')
+          printf 'Published `%s`\n\nDigest: `%s`\n' "$RELEASE_IMAGE" "$digest" >> "$GITHUB_STEP_SUMMARY"
+      - name: Log out of GHCR
+        if: always()
+        run: docker logout ghcr.io
