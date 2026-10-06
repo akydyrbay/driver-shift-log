@@ -1,6 +1,8 @@
 import os
+import sqlite3
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Barrier
@@ -9,15 +11,15 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.storage import JsonTripStore
+from app.storage import SqliteTripStore
 from tests.fixtures import trip_payload
 
 
 class CreateTripApiTests(unittest.TestCase):
     def setUp(self):
         directory = self.enterContext(TemporaryDirectory())
-        self.path = Path(directory) / "trips.json"
-        self.enterContext(patch.dict(os.environ, {"TRIPS_FILE": str(self.path)}))
+        self.path = Path(directory) / "trips.sqlite3"
+        self.enterContext(patch.dict(os.environ, {"TRIPS_DB": str(self.path)}))
         self.client = self.enterContext(TestClient(app))
 
     def summary(self):
@@ -30,7 +32,7 @@ class CreateTripApiTests(unittest.TestCase):
         response = self.client.post("/api/trips", json=payload)
         self.assertEqual(response.status_code, 201, response.text)
         self.assertEqual(response.json(), payload)
-        persisted = JsonTripStore(self.path).list_trips()
+        persisted = SqliteTripStore(self.path).list_trips()
         self.assertEqual([trip.model_dump(mode="json") for trip in persisted], [payload])
 
         trips = self.client.get("/api/trips", params={"date": "2026-10-01"})
@@ -49,16 +51,14 @@ class CreateTripApiTests(unittest.TestCase):
             },
         )
 
-    def test_identical_retries_return_200_without_rewriting_file(self):
+    def test_identical_retries_return_200_without_changing_records(self):
         payload = trip_payload()
         self.assertEqual(self.client.post("/api/trips", json=payload).status_code, 201)
         original = self.path.read_bytes()
-        with patch("app.storage.os.replace") as replace:
-            for _ in range(3):
-                response = self.client.post("/api/trips", json=payload)
-                self.assertEqual(response.status_code, 200, response.text)
-                self.assertEqual(response.json(), payload)
-            replace.assert_not_called()
+        for _ in range(3):
+            response = self.client.post("/api/trips", json=payload)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json(), payload)
         self.assertEqual(self.path.read_bytes(), original)
         self.assertEqual(self.summary()["trip_count"], 1)
         self.assertEqual(self.summary()["revenue"], 2400)
@@ -66,11 +66,11 @@ class CreateTripApiTests(unittest.TestCase):
     def test_retry_after_storage_is_reopened_is_still_idempotent(self):
         payload = trip_payload()
         self.assertEqual(self.client.post("/api/trips", json=payload).status_code, 201)
-        app.state.trip_store = JsonTripStore(self.path)
+        app.state.trip_store = SqliteTripStore(self.path)
         response = self.client.post("/api/trips", json=payload)
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json(), payload)
-        self.assertEqual(len(JsonTripStore(self.path).list_trips()), 1)
+        self.assertEqual(len(SqliteTripStore(self.path).list_trips()), 1)
 
     def test_equivalent_timestamp_offsets_return_the_saved_representation(self):
         payload = trip_payload()
@@ -116,6 +116,7 @@ class CreateTripApiTests(unittest.TestCase):
             ({"amount": -1}, "greater than 0"),
             ({"amount": "2400"}, "integer"),
             ({"amount": True}, "integer"),
+            ({"amount": 2**63}, "less than or equal to"),
             ({"commission": -1}, "greater than or equal to 0"),
             ({"commission": 2500}, "Commission must not exceed amount"),
             ({"end": "2026-10-01T08:10:00+05:00"}, "end must be later"),
@@ -134,7 +135,7 @@ class CreateTripApiTests(unittest.TestCase):
                 self.assertEqual(errors[0]["loc"][0], "body")
                 self.assertEqual(self.path.read_bytes(), original)
 
-    def test_missing_fields_and_malformed_bodies_do_not_create_a_file(self):
+    def test_missing_fields_and_malformed_bodies_do_not_create_records(self):
         for field in trip_payload():
             payload = trip_payload()
             del payload[field]
@@ -148,7 +149,7 @@ class CreateTripApiTests(unittest.TestCase):
                     "/api/trips", content=body, headers={"Content-Type": "application/json"}
                 )
                 self.assertEqual(response.status_code, 422, response.text)
-        self.assertFalse(self.path.exists())
+        self.assertEqual(SqliteTripStore(self.path).list_trips(), [])
 
     def test_concurrent_identical_submissions_create_one_trip(self):
         workers = 8
@@ -163,7 +164,7 @@ class CreateTripApiTests(unittest.TestCase):
         self.assertEqual(sorted(response.status_code for response in responses), [200] * 7 + [201])
         for response in responses:
             self.assertEqual(response.json(), trip_payload())
-        self.assertEqual(len(JsonTripStore(self.path).list_trips()), 1)
+        self.assertEqual(len(SqliteTripStore(self.path).list_trips()), 1)
         self.assertEqual(self.summary()["trip_count"], 1)
 
     def test_concurrent_conflicting_submissions_preserve_one_winner(self):
@@ -178,7 +179,7 @@ class CreateTripApiTests(unittest.TestCase):
             responses = list(executor.map(submit, range(workers)))
         self.assertEqual(sorted(response.status_code for response in responses), [201] + [409] * 7)
         winner = next(response.json() for response in responses if response.status_code == 201)
-        stored = JsonTripStore(self.path).list_trips()
+        stored = SqliteTripStore(self.path).list_trips()
         self.assertEqual([trip.model_dump(mode="json") for trip in stored], [winner])
         self.assertEqual(self.summary()["revenue"], winner["amount"])
 
@@ -187,15 +188,19 @@ class CreateTripApiTests(unittest.TestCase):
             self.client.post("/api/trips", json=trip_payload(id="original")).status_code,
             201,
         )
-        original = self.path.read_bytes()
-        with (
-            patch("app.storage.os.replace", side_effect=OSError("disk error")),
-            self.assertLogs("app.main", level="ERROR"),
-        ):
+        original = SqliteTripStore(self.path).list_trips()
+        with closing(sqlite3.connect(self.path)) as connection:
+            connection.execute("""
+                CREATE TRIGGER fail_insert BEFORE INSERT ON trips
+                BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END
+            """)
+        with self.assertLogs("app.main", level="ERROR"):
             response = self.client.post("/api/trips", json=trip_payload())
         self.assertEqual(response.status_code, 503, response.text)
         self.assertEqual(response.json(), {"detail": "Trip storage is unavailable"})
-        self.assertEqual(self.path.read_bytes(), original)
+        self.assertEqual(SqliteTripStore(self.path).list_trips(), original)
+        with closing(sqlite3.connect(self.path)) as connection:
+            connection.execute("DROP TRIGGER fail_insert")
         response = self.client.post("/api/trips", json=trip_payload())
         self.assertEqual(response.status_code, 201, response.text)
         self.assertEqual(self.summary()["trip_count"], 2)

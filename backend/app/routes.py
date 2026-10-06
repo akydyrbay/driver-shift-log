@@ -9,7 +9,7 @@ from pydantic import BeforeValidator
 
 from app.models import DailySummary, Trip
 from app.reporting import summary_for_day, trips_for_day
-from app.storage import DuplicateTripError, JsonTripStore
+from app.storage import DuplicateTripError, SqliteTripStore
 
 router = APIRouter(
     prefix="/api",
@@ -31,11 +31,11 @@ DayQuery = Annotated[
 ]
 
 
-def get_store(request: Request) -> JsonTripStore:
+def get_store(request: Request) -> SqliteTripStore:
     return request.app.state.trip_store
 
 
-StoreDependency = Annotated[JsonTripStore, Depends(get_store)]
+StoreDependency = Annotated[SqliteTripStore, Depends(get_store)]
 
 
 @router.post(

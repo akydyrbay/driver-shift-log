@@ -11,17 +11,17 @@ from app.storage import TripStorageError
 class StartupTests(unittest.IsolatedAsyncioTestCase):
     async def test_startup_configures_the_application_store(self):
         with TemporaryDirectory() as directory:
-            path = Path(directory) / "trips.json"
-            with patch.dict(os.environ, {"TRIPS_FILE": str(path)}):
+            path = Path(directory) / "trips.sqlite3"
+            with patch.dict(os.environ, {"TRIPS_DB": str(path)}):
                 async with app.router.lifespan_context(app):
                     self.assertEqual(app.state.trip_store.path, path)
                     self.assertEqual(app.state.trip_store.list_trips(), [])
 
     async def test_startup_rejects_corrupted_existing_data(self):
         with TemporaryDirectory() as directory:
-            path = Path(directory) / "trips.json"
+            path = Path(directory) / "trips.sqlite3"
             path.write_text("broken JSON", encoding="utf-8")
-            with patch.dict(os.environ, {"TRIPS_FILE": str(path)}):
+            with patch.dict(os.environ, {"TRIPS_DB": str(path)}):
                 with self.assertRaises(TripStorageError):
                     async with app.router.lifespan_context(app):
                         self.fail("Startup must not succeed with corrupted data")

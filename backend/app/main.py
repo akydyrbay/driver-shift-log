@@ -8,15 +8,16 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.routes import router
-from app.storage import JsonTripStore, TripStorageError
+from app.storage import SqliteTripStore, TripStorageError
 
 logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(application: FastAPI) -> AsyncIterator[None]:
-    store = JsonTripStore.from_environment()
-    store.list_trips()  # Fail startup if an existing data file is invalid.
+    store = SqliteTripStore.from_environment()
+    store.initialize()
+    store.list_trips()  # Fail startup if existing records are invalid.
     application.state.trip_store = store
     yield
 

@@ -9,15 +9,15 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.models import Trip
-from app.storage import DEFAULT_TRIPS_FILE
+from app.storage import DEFAULT_IMPORT_FILE
 from tests.fixtures import trip_payload
 
 
 class DailyApiTests(unittest.TestCase):
     def setUp(self):
         directory = self.enterContext(TemporaryDirectory())
-        self.path = Path(directory) / "trips.json"
-        self.enterContext(patch.dict(os.environ, {"TRIPS_FILE": str(self.path)}))
+        self.path = Path(directory) / "trips.sqlite3"
+        self.enterContext(patch.dict(os.environ, {"TRIPS_DB": str(self.path)}))
         self.client = self.enterContext(TestClient(app))
         self.store = app.state.trip_store
 
@@ -45,7 +45,7 @@ class DailyApiTests(unittest.TestCase):
         )
 
     def test_original_sample_list_and_summary(self):
-        sample = json.loads(DEFAULT_TRIPS_FILE.read_text(encoding="utf-8"))
+        sample = json.loads(DEFAULT_IMPORT_FILE.read_text(encoding="utf-8"))
         for record in sample:
             self.store.add_trip(Trip.model_validate(record))
 
@@ -63,9 +63,9 @@ class DailyApiTests(unittest.TestCase):
             },
         )
 
-    def test_empty_store_returns_zero_totals_without_creating_file(self):
+    def test_empty_database_returns_zero_totals(self):
         self.assert_empty_day("2026-10-01")
-        self.assertFalse(self.path.exists())
+        self.assertEqual(self.store.list_trips(), [])
 
     def test_other_days_are_excluded(self):
         self.add_trip()
@@ -187,7 +187,7 @@ class DailyApiTests(unittest.TestCase):
         self.assertEqual(self.get_json("/api/summary", "2026-10-01")["revenue"], 2400)
 
     def test_corrupted_storage_returns_503_instead_of_empty_results(self):
-        self.path.write_text("broken JSON", encoding="utf-8")
+        self.path.write_bytes(b"broken SQLite database")
         for endpoint in ("/api/trips", "/api/summary"):
             with self.subTest(endpoint=endpoint), self.assertLogs("app.main", level="ERROR"):
                 response = self.client.get(endpoint, params={"date": "2026-10-01"})

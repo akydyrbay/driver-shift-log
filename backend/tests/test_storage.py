@@ -1,8 +1,9 @@
-import json
+import multiprocessing
 import os
+import sqlite3
 import unittest
-from concurrent.futures import ThreadPoolExecutor
-from contextlib import chdir
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from contextlib import chdir, closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Barrier
@@ -11,175 +12,183 @@ from unittest.mock import patch
 from pydantic import ValidationError
 
 from app.models import Trip
-from app.storage import (
-    DEFAULT_TRIPS_FILE,
-    DuplicateTripError,
-    JsonTripStore,
-    TripStorageError,
-)
+from app.storage import DEFAULT_DATABASE, DuplicateTripError, SqliteTripStore, TripStorageError
 from tests.fixtures import trip_payload
 
 
-class JsonTripStoreTests(unittest.TestCase):
+def add_in_process(path, identifier):
+    store = SqliteTripStore(path)
+    try:
+        store.add_trip(Trip.model_validate(trip_payload(id=identifier)))
+        return True
+    except DuplicateTripError:
+        return False
+
+
+class SqliteTripStoreTests(unittest.TestCase):
     def setUp(self):
-        directory = TemporaryDirectory()
-        self.addCleanup(directory.cleanup)
-        self.path = Path(directory.name) / "trips.json"
-        self.store = JsonTripStore(self.path)
+        directory = self.enterContext(TemporaryDirectory())
+        self.path = Path(directory) / "trips.sqlite3"
+        self.store = SqliteTripStore(self.path)
+        self.store.initialize()
         self.trip = Trip.model_validate(trip_payload())
 
-    def test_reads_original_example(self):
-        trips = JsonTripStore(DEFAULT_TRIPS_FILE).list_trips()
-        self.assertEqual([trip.id for trip in trips], ["t1", "t2"])
-        self.assertEqual([trip.amount for trip in trips], [2400, 1500])
-        self.assertEqual([trip.payment for trip in trips], ["card", "cash"])
+    def test_initializes_empty_database_and_nested_directories(self):
+        nested = SqliteTripStore(self.path.parent / "nested" / "trips.sqlite3")
+        nested.initialize()
+        self.assertEqual(nested.list_trips(), [])
+        self.assertTrue(nested.path.is_file())
 
-    def test_missing_file_is_empty_and_read_has_no_side_effects(self):
-        self.assertEqual(self.store.list_trips(), [])
-        self.assertFalse(self.path.exists())
+    def test_initialization_preserves_existing_records(self):
+        self.store.add_trip(self.trip)
+        reopened = SqliteTripStore(self.path)
+        reopened.initialize()
+        self.assertEqual(reopened.list_trips(), [self.trip])
 
     def test_persists_records_after_reopening(self):
         second = Trip.model_validate(trip_payload(id="second", payment="cash"))
         self.store.add_trip(self.trip)
-        JsonTripStore(self.path).add_trip(second)
-        self.assertEqual(JsonTripStore(self.path).list_trips(), [self.trip, second])
-        stored = json.loads(self.path.read_text(encoding="utf-8"))
-        self.assertEqual(stored[0], trip_payload())
-        self.assertEqual(list(self.path.parent.glob("*.tmp")), [])
-
-    def test_creates_parent_directory_on_first_write(self):
-        nested = JsonTripStore(self.path.parent / "data" / "nested" / "trips.json")
-        nested.add_trip(self.trip)
-        self.assertEqual(JsonTripStore(nested.path).list_trips(), [self.trip])
-
-    def test_returns_independent_lists(self):
-        self.store.add_trip(self.trip)
-        self.store.list_trips().clear()
-        self.assertEqual(self.store.list_trips(), [self.trip])
-
-    def test_refuses_to_read_or_overwrite_invalid_files(self):
-        for contents in (
-            "",
-            "[{broken json",
-            "{}",
-            "null",
-            json.dumps([trip_payload(amount=0)]),
-            json.dumps([trip_payload(), trip_payload()]),
-        ):
-            with self.subTest(contents=contents):
-                self.path.write_text(contents, encoding="utf-8")
-                with self.assertRaises(TripStorageError):
-                    self.store.list_trips()
-                with self.assertRaises(TripStorageError):
-                    self.store.add_trip(self.trip)
-                self.assertEqual(self.path.read_text(encoding="utf-8"), contents)
-
-    def test_directory_instead_of_file_is_an_error(self):
-        self.path.mkdir()
-        with self.assertRaises(TripStorageError):
-            self.store.list_trips()
+        SqliteTripStore(self.path).add_trip(second)
+        self.assertEqual(SqliteTripStore(self.path).list_trips(), [self.trip, second])
+        with closing(sqlite3.connect(self.path)) as connection:
+            self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 1)
 
     def test_existing_id_is_not_overwritten(self):
         self.store.add_trip(self.trip)
-        original = self.path.read_bytes()
-        for candidate in (
-            self.trip,
-            Trip.model_validate(trip_payload(amount=2500)),
-        ):
+        for candidate in (self.trip, Trip.model_validate(trip_payload(amount=2500))):
             with self.subTest(candidate=candidate):
                 with self.assertRaises(DuplicateTripError) as caught:
                     self.store.add_trip(candidate)
                 self.assertEqual(caught.exception.existing, self.trip)
-                self.assertEqual(self.path.read_bytes(), original)
+                self.assertEqual(self.store.list_trips(), [self.trip])
 
     def test_revalidates_records_before_saving(self):
         invalid = self.trip.model_copy(update={"amount": -1})
         with self.assertRaises(ValidationError):
             self.store.add_trip(invalid)
-        self.assertFalse(self.path.exists())
+        self.assertEqual(self.store.list_trips(), [])
 
-    def test_write_failures_preserve_original_file_and_clean_temporary_file(self):
+    def test_maximum_sqlite_integer_round_trips_without_loss(self):
+        trip = Trip.model_validate(trip_payload(amount=2**63 - 1, commission=2**63 - 1))
+        self.store.add_trip(trip)
+        self.assertEqual(self.store.list_trips(), [trip])
+
+    def test_sql_metacharacters_in_ids_are_stored_as_data(self):
+        trip = Trip.model_validate(trip_payload(id="x'); DROP TABLE trips; --"))
+        self.store.add_trip(trip)
+        self.assertEqual(self.store.list_trips(), [trip])
+
+    def test_database_constraints_reject_invalid_direct_inserts(self):
+        statement = """INSERT INTO trips (id, start, end, amount, payment, commission)
+                       VALUES (:id, :start, :end, :amount, :payment, :commission)"""
         self.store.add_trip(self.trip)
-        original = self.path.read_bytes()
-        second = Trip.model_validate(trip_payload(id="second"))
-        for operation in ("os.fsync", "os.replace"):
-            with self.subTest(operation=operation):
-                with patch(f"app.storage.{operation}", side_effect=OSError("disk error")):
-                    with self.assertRaises(TripStorageError):
-                        self.store.add_trip(second)
-                self.assertEqual(self.path.read_bytes(), original)
-                self.assertEqual(list(self.path.parent.iterdir()), [self.path])
+        invalid = [
+            trip_payload(),
+            trip_payload(id=""),
+            trip_payload(id="bad", amount=0),
+            trip_payload(id="bad", amount=1.5, commission=0),
+            trip_payload(id="bad", payment="transfer"),
+            trip_payload(id="bad", commission=-1),
+            trip_payload(id="bad", commission=2500),
+        ]
+        for payload in invalid:
+            with self.subTest(payload=payload):
+                with closing(sqlite3.connect(self.path)) as connection:
+                    with self.assertRaises(sqlite3.IntegrityError), connection:
+                        connection.execute(statement, payload)
+        self.assertEqual(self.store.list_trips(), [self.trip])
 
-        # A failed transaction must release the lock for the next attempt.
-        self.store.add_trip(second)
-        self.assertEqual(self.store.list_trips(), [self.trip, second])
+    def test_invalid_stored_timestamp_is_reported(self):
+        self.store.add_trip(self.trip)
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            connection.execute("UPDATE trips SET start = 'invalid'")
+        with self.assertRaises(TripStorageError):
+            self.store.list_trips()
 
-    def test_concurrent_additions_across_instances_do_not_lose_records(self):
+    def test_corrupted_database_is_not_overwritten(self):
+        bad_path = self.path.parent / "bad.sqlite3"
+        bad_path.write_bytes(b"not a SQLite database")
+        with self.assertRaises(TripStorageError):
+            SqliteTripStore(bad_path).initialize()
+        self.assertEqual(bad_path.read_bytes(), b"not a SQLite database")
+
+    def test_directory_instead_of_database_is_an_error(self):
+        with self.assertRaises(TripStorageError):
+            SqliteTripStore(self.path.parent).initialize()
+
+    def test_missing_database_is_not_silently_recreated(self):
+        missing = self.path.parent / "missing.sqlite3"
+        store = SqliteTripStore(missing)
+        with self.assertRaises(TripStorageError):
+            store.list_trips()
+        with self.assertRaises(TripStorageError):
+            store.add_trip(self.trip)
+        self.assertFalse(missing.exists())
+
+    def test_unknown_schema_version_is_rejected(self):
+        with closing(sqlite3.connect(self.path)) as connection:
+            connection.execute("PRAGMA user_version = 99")
+        with self.assertRaisesRegex(TripStorageError, "schema version"):
+            self.store.initialize()
+
+    def test_lock_timeout_is_reported_and_retry_succeeds(self):
+        impatient = SqliteTripStore(self.path, timeout=0.01)
+        with closing(sqlite3.connect(self.path)) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            with self.assertRaises(TripStorageError) as caught:
+                impatient.add_trip(self.trip)
+            self.assertIsInstance(caught.exception.__cause__, sqlite3.OperationalError)
+            connection.rollback()
+        impatient.add_trip(self.trip)
+        self.assertEqual(self.store.list_trips(), [self.trip])
+
+    def test_concurrent_additions_do_not_lose_records(self):
         workers = 12
         barrier = Barrier(workers, timeout=10)
 
         def add(index):
-            store = JsonTripStore(self.path.parent / "." / self.path.name)
-            trip = Trip.model_validate(trip_payload(id=f"trip-{index}"))
             barrier.wait()
-            store.add_trip(trip)
+            SqliteTripStore(self.path).add_trip(Trip.model_validate(trip_payload(id=f"trip-{index}")))
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
             list(executor.map(add, range(workers)))
-
         self.assertEqual(
             {trip.id for trip in self.store.list_trips()},
             {f"trip-{index}" for index in range(workers)},
         )
 
-    def test_cleanup_failure_does_not_hide_the_write_error(self):
-        self.store.add_trip(self.trip)
-        original = self.path.read_bytes()
-        write_error = OSError("disk error")
-        with (
-            patch("app.storage.os.replace", side_effect=write_error),
-            patch("pathlib.Path.unlink", side_effect=PermissionError("cleanup error")),
-            self.assertLogs("app.storage", level="WARNING"),
-        ):
-            with self.assertRaises(TripStorageError) as caught:
-                self.store.add_trip(Trip.model_validate(trip_payload(id="second")))
-        self.assertIs(caught.exception.__cause__, write_error)
-        self.assertEqual(self.path.read_bytes(), original)
-
-    def test_concurrent_same_id_has_only_one_successful_write(self):
-        workers = 8
-        barrier = Barrier(workers, timeout=10)
-
-        def add(_):
-            store = JsonTripStore(self.path)
-            barrier.wait()
-            try:
-                store.add_trip(self.trip)
-                return True
-            except DuplicateTripError:
-                return False
-
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            results = list(executor.map(add, range(workers)))
-
-        self.assertEqual(sum(results), 1)
-        self.assertEqual(self.store.list_trips(), [self.trip])
+    def test_separate_processes_share_duplicate_protection(self):
+        with ProcessPoolExecutor(
+            max_workers=4, mp_context=multiprocessing.get_context("spawn")
+        ) as executor:
+            results = list(executor.map(add_in_process, [str(self.path)] * 8, ["shared"] * 8))
+            self.assertEqual(sum(results), 1)
+            identifiers = [f"process-{index}" for index in range(4)]
+            self.assertTrue(all(executor.map(add_in_process, [str(self.path)] * 4, identifiers)))
+        self.assertEqual(
+            {trip.id for trip in self.store.list_trips()}, {"shared", *identifiers}
+        )
 
     def test_path_can_be_configured_through_environment(self):
-        with patch.dict(os.environ, {"TRIPS_FILE": str(self.path)}):
-            store = JsonTripStore.from_environment()
-        self.assertEqual(store.path, self.path)
-        store.add_trip(self.trip)
-        self.assertEqual(self.store.list_trips(), [self.trip])
+        with patch.dict(os.environ, {"TRIPS_DB": str(self.path)}):
+            self.assertEqual(SqliteTripStore.from_environment().path, self.path)
 
     def test_default_path_is_independent_of_working_directory(self):
         with patch.dict(os.environ):
+            os.environ.pop("TRIPS_DB", None)
             os.environ.pop("TRIPS_FILE", None)
             with chdir(self.path.parent):
-                self.assertEqual(JsonTripStore.from_environment().path, DEFAULT_TRIPS_FILE)
+                self.assertEqual(SqliteTripStore.from_environment().path, DEFAULT_DATABASE)
 
     def test_rejects_empty_environment_path(self):
-        for value in ("", " \t"):
-            with self.subTest(value=value), patch.dict(os.environ, {"TRIPS_FILE": value}):
+        for value in ("", " "):
+            with self.subTest(value=value), patch.dict(os.environ, {"TRIPS_DB": value}):
                 with self.assertRaises(ValueError):
-                    JsonTripStore.from_environment()
+                    SqliteTripStore.from_environment()
+
+    def test_legacy_environment_requires_explicit_migration(self):
+        with patch.dict(os.environ, {"TRIPS_FILE": "old-trips.json"}):
+            os.environ.pop("TRIPS_DB", None)
+            with self.assertRaisesRegex(ValueError, "import"):
+                SqliteTripStore.from_environment()

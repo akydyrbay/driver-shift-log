@@ -170,3 +170,7 @@ dmypy.json
 !/frontend/lib/**
 !/frontend/pubspec.lock
 !/backend/uv.lock
+
+# Local SQLite databases and their transaction files.
+*.sqlite3
+*.sqlite3-*

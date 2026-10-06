@@ -19,9 +19,9 @@ class Trip(BaseModel):
     id: Annotated[str, Field(strict=True, min_length=1, pattern=r"\S")]
     start: AwareDatetime
     end: AwareDatetime
-    amount: Annotated[int, Field(strict=True, gt=0)]
+    amount: Annotated[int, Field(strict=True, gt=0, le=2**63 - 1)]
     payment: Literal["cash", "card"]
-    commission: Annotated[int, Field(strict=True, ge=0)]
+    commission: Annotated[int, Field(strict=True, ge=0, le=2**63 - 1)]
 
     @field_validator("start", "end", mode="before")
     @classmethod
