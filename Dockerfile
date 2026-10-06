@@ -49,5 +49,7 @@ COPY --from=web-build /src/build/web/ ./web/
 USER 10001:10001
 EXPOSE 8000
 HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
-    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).close()"]
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    CMD ["python", "-c", "import os, urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"PORT\", \"8000\")}/health', timeout=2).close()"]
+# Hosts such as Render set PORT. SEED_FILE optionally imports trips on every start;
+# the import is idempotent, and a failed seed must not block the server.
+CMD ["sh", "-c", "if [ -n \"$SEED_FILE\" ]; then python -m app.import_trips \"$SEED_FILE\" || true; fi; exec uvicorn app.main:app --host 0.0.0.0 --port \"${PORT:-8000}\""]

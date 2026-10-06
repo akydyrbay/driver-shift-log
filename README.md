@@ -88,6 +88,8 @@ flutter run -d chrome --web-hostname localhost --web-port 8080 \
 | `WEB_DIR` | Каталог собранного клиента; если задан, backend раздаёт его на `/` |
 | `API_BASE_URL` | `--dart-define` для Flutter, адрес API без `/api`; по умолчанию тот же origin |
 | `APP_PORT` | Порт Compose на хосте, по умолчанию `8080` |
+| `PORT` | Порт сервера внутри контейнера, по умолчанию `8000` (задаётся хостингом, например Render) |
+| `SEED_FILE` | JSON для импорта при каждом запуске контейнера, например `/app/examples/demo_trips.json` |
 
 ## API
 
