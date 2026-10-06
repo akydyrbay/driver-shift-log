@@ -6,6 +6,19 @@ FastAPI + Flutter Web + SQLite, единый Docker-образ, CI/CD в GitHub 
 - [backend/README.md](backend/README.md) — API, хранилище, импорт JSON.
 - [frontend/README.md](frontend/README.md) — Web-клиент.
 
+## Скриншоты
+
+<table>
+  <tr>
+    <td valign="top"><img src="docs/screenshots/dashboard.png" alt="Сводка и поездки за день" width="520"></td>
+    <td valign="top"><img src="docs/screenshots/new-trip.png" alt="Форма новой поездки" width="260"></td>
+  </tr>
+  <tr>
+    <td align="center">Сводка и поездки за день</td>
+    <td align="center">Добавление поездки</td>
+  </tr>
+</table>
+
 ## Возможности
 
 - Выбор дня, список поездок, сводка: число поездок, выручка, комиссия,
