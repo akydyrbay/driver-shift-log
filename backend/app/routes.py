@@ -4,12 +4,12 @@ import re
 from datetime import date as CalendarDate
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BeforeValidator
 
 from app.models import DailySummary, Trip
 from app.reporting import summary_for_day, trips_for_day
-from app.storage import JsonTripStore
+from app.storage import DuplicateTripError, JsonTripStore
 
 router = APIRouter(
     prefix="/api",
@@ -36,6 +36,28 @@ def get_store(request: Request) -> JsonTripStore:
 
 
 StoreDependency = Annotated[JsonTripStore, Depends(get_store)]
+
+
+@router.post(
+    "/trips",
+    status_code=status.HTTP_201_CREATED,
+    responses={
+        200: {"model": Trip, "description": "Identical trip already exists"},
+        409: {"description": "Trip ID already exists with different data"},
+    },
+)
+def create_trip(trip: Trip, response: Response, store: StoreDependency) -> Trip:
+    """Create a trip, or return the saved record for an identical retry."""
+    try:
+        return store.add_trip(trip)
+    except DuplicateTripError as exc:
+        if exc.existing != trip:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Trip ID already exists with different data",
+            ) from exc
+        response.status_code = status.HTTP_200_OK
+        return exc.existing
 
 
 @router.get("/trips")
