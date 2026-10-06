@@ -1,6 +1,6 @@
 """Validated trip records shared by the API and file storage."""
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Annotated, Literal, Self
 
 from pydantic import (
@@ -44,3 +44,17 @@ class Trip(BaseModel):
         if self.commission > self.amount:
             raise ValueError("Commission must not exceed amount")
         return self
+
+
+class DailySummary(BaseModel):
+    """Daily totals; cash and card amounts are revenue before commission."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    date: date
+    trip_count: int = Field(ge=0)
+    revenue: int = Field(ge=0)
+    commission: int = Field(ge=0)
+    take_home: int = Field(ge=0)
+    cash_revenue: int = Field(ge=0)
+    card_revenue: int = Field(ge=0)
