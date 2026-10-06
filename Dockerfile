@@ -44,7 +44,7 @@ RUN groupadd --gid 10001 app \
     && chown app:app /data
 COPY --from=backend-build /app/.venv /app/.venv
 COPY backend/app/ ./app/
-COPY backend/data/trips.json ./examples/trips.json
+COPY backend/data/trips.json backend/data/demo_trips.json ./examples/
 COPY --from=web-build /src/build/web/ ./web/
 USER 10001:10001
 EXPOSE 8000

@@ -41,6 +41,15 @@ docker compose exec app python -m app.import_trips /app/examples/trips.json
 Свой JSON: `docker compose cp trips.json app:/tmp/trips.json`, затем импорт
 `/tmp/trips.json` той же командой.
 
+Демо-данные для скриншотов — 37 поездок с 30 сентября по 6 октября 2026
+(включая пример выше, выходной 4 октября и поездку через полночь 3 октября):
+
+```bash
+docker compose exec app python -m app.import_trips /app/examples/demo_trips.json
+```
+
+Локально: `uv run --locked python -m app.import_trips data/demo_trips.json` из `backend/`.
+
 ### Данные и backup
 
 База хранится в томе `trips-data` (`/data` в контейнере). `docker compose down`

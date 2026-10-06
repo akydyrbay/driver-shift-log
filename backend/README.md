@@ -38,6 +38,9 @@ uv run --locked python -m app.import_trips path/to/trips.json [--database path.s
 импорт. Исходный файл не изменяется. JSON — только источник импорта, API работает
 с SQLite. Если задана только устаревшая `TRIPS_FILE`, запуск завершится ошибкой.
 
+Готовые файлы: `data/trips.json` — минимальный пример (2 поездки за 2026-10-01),
+`data/demo_trips.json` — неделя демо-данных для скриншотов (включает пример).
+
 ## API
 
 ### `GET /api/trips?date=YYYY-MM-DD` и `GET /api/summary?date=YYYY-MM-DD`

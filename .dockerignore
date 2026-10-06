@@ -11,6 +11,7 @@
 !backend/app/*.py
 !backend/data/
 !backend/data/trips.json
+!backend/data/demo_trips.json
 !frontend/
 !frontend/.flutter-version
 !frontend/pubspec.yaml
